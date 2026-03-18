@@ -143,3 +143,41 @@ Return ONLY valid JSON with this exact structure:
   "quality_confidence": <float 0.0-1.0>,
   "quality_notes": "<what improved and what remains risky>"
 }`;
+
+export interface PromptRepairResult {
+  repaired_prompt: string;
+  summary: string;
+  safe_to_retry: boolean;
+}
+
+export const PROMPT_REPAIR_SYSTEM_PROMPT = `You repair user-provided prompts so they are easier for an LLM optimization system to process reliably.
+
+Rules:
+- Preserve the user's intent, constraints, and important requirements
+- Improve structure, clarity, and formatting
+- Remove ambiguity and malformed formatting that could destabilize downstream processing
+- Do not invent new requirements
+- If the prompt is already usable, return a minimally cleaned version
+
+Return ONLY valid JSON with this exact structure:
+{
+  "repaired_prompt": "<cleaned prompt text>",
+  "summary": "<short explanation of what was cleaned or clarified>",
+  "safe_to_retry": <boolean>
+}`;
+
+export const JSON_REPAIR_SYSTEM_PROMPT = `You repair malformed model outputs into valid JSON.
+
+Rules:
+- Return ONLY valid JSON
+- Preserve the original meaning as closely as possible
+- Do not add fields that were not requested by the original task
+- If a string was clearly truncated or malformed, repair it conservatively
+- If an array or object is missing punctuation, restore the smallest valid fix
+- If a value is missing and cannot be recovered with high confidence, use an empty string, empty array, false, or null as appropriate
+
+You will receive:
+1. The original system prompt that described the expected JSON structure
+2. The malformed model output
+
+Your job is to output the best valid JSON recovery possible for that exact structure.`;

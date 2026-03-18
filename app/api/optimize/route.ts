@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { runOptimizationPipeline } from '@/lib/optimizationPipeline';
 import { logOptimizationEvent } from '@/lib/optimizationLogger';
+import { toSerializableError } from '@/lib/appErrors';
 
 export async function POST(req: NextRequest) {
   const { prompt, fileContent, fileName, craftAsSystemPrompt } = await req.json();
@@ -32,10 +33,10 @@ export async function POST(req: NextRequest) {
           encoder.encode(`data: ${JSON.stringify({ done: true, result })}\n\n`)
         );
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Optimization failed';
-        logOptimizationEvent('pipeline_error', { message }, 'error');
+        const serialized = toSerializableError(err);
+        logOptimizationEvent('pipeline_error', { code: serialized.code, message: serialized.technicalMessage ?? serialized.userMessage }, 'error');
         controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ error: message })}\n\n`)
+          encoder.encode(`data: ${JSON.stringify({ error: serialized })}\n\n`)
         );
       } finally {
         controller.close();

@@ -31,6 +31,7 @@ import {
   type OptimizationMode,
 } from '@/lib/promptUtils';
 import { countTokens } from '@/lib/tokenCounter';
+import { AppError } from '@/lib/appErrors';
 
 export interface PipelineInput {
   prompt: string;
@@ -219,6 +220,16 @@ export async function runOptimizationPipeline(input: PipelineInput): Promise<Pip
   const cacheInput = buildCacheInput(input, mode);
   const exactCacheKey = getExactCacheKey(cacheInput);
   const originalTokens = countTokens(input.prompt);
+
+  if (originalTokens > OPTIMIZATION_CONFIG.maxPromptTokens) {
+    throw new AppError({
+      code: 'PROMPT_TOO_LARGE',
+      userMessage: `This prompt is too large to optimize reliably in one pass. Please shorten it to under ${OPTIMIZATION_CONFIG.maxPromptTokens} tokens or split it into smaller sections.`,
+      technicalMessage: `Prompt token count ${originalTokens} exceeds limit ${OPTIMIZATION_CONFIG.maxPromptTokens}.`,
+      canAutoFix: true,
+      suggestedAction: 'Use AI Magic Fix to clean or simplify the prompt before retrying.',
+    });
+  }
 
   logOptimizationEvent('pipeline_start', {
     mode,

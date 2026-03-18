@@ -9,11 +9,26 @@ import DiffViewer from '@/components/DiffViewer';
 import ChatBot from '@/components/ChatBot';
 import FileUpload from '@/components/FileUpload';
 import SavingsPanel from '@/components/SavingsPanel';
+import PromptRegistryPanel from '@/components/PromptRegistryPanel';
 import type { SavingsPanelHandle } from '@/components/SavingsPanel';
 import { countTokens } from '@/lib/tokenCounter';
 import type { OptimizationResult } from '@/lib/optimizer';
 
 type Tab = 'craft' | 'optimize';
+
+interface OptimizationUiError {
+  code?: string;
+  message: string;
+  technicalMessage?: string;
+  canAutoFix?: boolean;
+  suggestedAction?: string;
+}
+
+interface PromptFixProposal {
+  repaired_prompt: string;
+  summary: string;
+  safe_to_retry: boolean;
+}
 
 export default function AppPage() {
   const [activeTab, setActiveTab] = useState<Tab>('craft');
@@ -24,9 +39,11 @@ export default function AppPage() {
   const [optimizedTokens, setOptimizedTokens] = useState(0);
   const [result, setResult] = useState<OptimizationResult | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<OptimizationUiError | null>(null);
   const [copied, setCopied] = useState(false);
   const [streamBuffer, setStreamBuffer] = useState('');
+  const [fixingPrompt, setFixingPrompt] = useState(false);
+  const [fixProposal, setFixProposal] = useState<PromptFixProposal | null>(null);
 
   // Craft-tab state
   const [fileContent, setFileContent] = useState<string | null>(null);
@@ -59,6 +76,7 @@ export default function AppPage() {
     setResult(null);
     setOptimized('');
     setError(null);
+    setFixProposal(null);
     setStreamBuffer('');
     setIsAutoOptimizing(false);
     if (tab === 'optimize') {
@@ -71,7 +89,7 @@ export default function AppPage() {
     body: Record<string, unknown>,
     onChunk: (chunk: string) => void,
     onDone: (result: OptimizationResult) => void,
-    onError: (msg: string) => void
+    onError: (error: OptimizationUiError) => void
   ) {
     const res = await fetch('/api/optimize', {
       method: 'POST',
@@ -103,7 +121,17 @@ export default function AppPage() {
         const data = JSON.parse(line.slice(6));
 
         if (data.error) {
-          onError(data.error);
+          if (typeof data.error === 'string') {
+            onError({ message: data.error });
+          } else {
+            onError({
+              code: data.error.code,
+              message: data.error.userMessage ?? 'Optimization failed',
+              technicalMessage: data.error.technicalMessage,
+              canAutoFix: data.error.canAutoFix,
+              suggestedAction: data.error.suggestedAction,
+            });
+          }
           return null;
         }
         if (data.chunk) onChunk(data.chunk);
@@ -116,17 +144,19 @@ export default function AppPage() {
     return null;
   }
 
-  async function optimize() {
-    if (!original.trim()) return;
+  async function optimizePrompt(promptText: string) {
+    if (!promptText.trim()) return;
+    const inputTokens = countTokens(promptText);
     setLoading(true);
     setError(null);
+    setFixProposal(null);
     setResult(null);
     setOptimized('');
     setStreamBuffer('');
     setIsAutoOptimizing(false);
 
     try {
-      const body: Record<string, unknown> = { prompt: original };
+      const body: Record<string, unknown> = { prompt: promptText };
       if (activeTab === 'craft' && fileContent) {
         body.fileContent = fileContent;
         body.fileName = fileName ?? 'uploaded-file';
@@ -142,14 +172,14 @@ export default function AppPage() {
           setOptimized(r.optimized);
           craftedText = r.optimized;
         },
-        (msg) => { throw new Error(msg); }
+        (uiError) => { throw uiError; }
       );
 
       // Record savings for craft step (only when not auto-optimizing, otherwise
       // we'll record the final optimized result below)
       if (craftResult && !autoOptimize) {
         const craftedTokens = countTokens(craftedText);
-        recordSaving(activeTab, originalTokens, craftedTokens);
+        recordSaving(activeTab, inputTokens, craftedTokens);
       }
 
       // Auto-optimize: chain a second optimize call on the crafted result
@@ -166,16 +196,20 @@ export default function AppPage() {
             setOptimized(r.optimized);
             finalOptimized = r.optimized;
           },
-          (msg) => { throw new Error(msg); }
+          (uiError) => { throw uiError; }
         );
 
         if (finalOptimized) {
-          recordSaving('optimize', originalTokens, countTokens(finalOptimized));
+          recordSaving('optimize', inputTokens, countTokens(finalOptimized));
         }
       }
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Operation failed';
-      setError(message);
+      if (typeof err === 'object' && err !== null && 'message' in err) {
+        const uiError = err as OptimizationUiError;
+        setError(uiError);
+      } else {
+        setError({ message: 'Operation failed' });
+      }
     } finally {
       setLoading(false);
       setStreamBuffer('');
@@ -183,10 +217,15 @@ export default function AppPage() {
     }
   }
 
+  async function optimize() {
+    await optimizePrompt(original);
+  }
+
   async function pipelineOptimize() {
     if (!optimized.trim()) return;
     setLoading(true);
     setError(null);
+    setFixProposal(null);
     setIsAutoOptimizing(true);
     setStreamBuffer('');
 
@@ -203,14 +242,18 @@ export default function AppPage() {
           setOptimized(r.optimized);
           pipelineResult = r.optimized;
         },
-        (msg) => { throw new Error(msg); }
+        (uiError) => { throw uiError; }
       );
       if (pipelineResult) {
         recordSaving('optimize', countTokens(textToOptimize), countTokens(pipelineResult));
       }
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Optimization failed';
-      setError(message);
+      if (typeof err === 'object' && err !== null && 'message' in err) {
+        const uiError = err as OptimizationUiError;
+        setError(uiError);
+      } else {
+        setError({ message: 'Optimization failed' });
+      }
     } finally {
       setLoading(false);
       setStreamBuffer('');
@@ -230,10 +273,65 @@ export default function AppPage() {
     setOptimized('');
     setResult(null);
     setError(null);
+    setFixProposal(null);
     setFileContent(null);
     setFileName(null);
     setStreamBuffer('');
     setIsAutoOptimizing(false);
+  }
+
+  function loadRegistryPrompt(content: string, target: 'original' | 'optimized') {
+    if (target === 'optimized') {
+      setOptimized(content);
+      return;
+    }
+    setOriginal(content);
+    setError(null);
+    setFixProposal(null);
+  }
+
+  async function requestMagicFix() {
+    if (!original.trim()) return;
+    setFixingPrompt(true);
+    setFixProposal(null);
+    try {
+      const res = await fetch('/api/prompt-fix', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: original,
+          mode: activeTab,
+          errorCode: error?.code,
+        }),
+      });
+
+      const payload = await res.json();
+      if (!res.ok) {
+        const fallback = typeof payload?.error?.userMessage === 'string'
+          ? payload.error.userMessage
+          : 'AI Magic Fix could not repair the prompt.';
+        throw new Error(fallback);
+      }
+
+      setFixProposal(payload as PromptFixProposal);
+    } catch (err: unknown) {
+      setError({
+        message: err instanceof Error ? err.message : 'AI Magic Fix failed.',
+      });
+    } finally {
+      setFixingPrompt(false);
+    }
+  }
+
+  async function applyMagicFix(retryAfterApply: boolean) {
+    if (!fixProposal) return;
+    setOriginal(fixProposal.repaired_prompt);
+    setError(null);
+    setFixProposal(null);
+
+    if (retryAfterApply) {
+      await optimizePrompt(fixProposal.repaired_prompt);
+    }
   }
 
   const displayOptimized = loading && streamBuffer ? streamBuffer : optimized;
@@ -466,11 +564,73 @@ export default function AppPage() {
           )}
 
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-1.5">
-              {error}
-            </p>
+            <div className="flex-1 min-w-[16rem] text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+              <p className="font-medium">{error.message}</p>
+              {error.suggestedAction && (
+                <p className="mt-1 text-xs text-red-600">{error.suggestedAction}</p>
+              )}
+              <div className="mt-2 flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={optimize}
+                  disabled={loading}
+                  className="text-xs font-medium text-red-700 border border-red-200 rounded-md px-2.5 py-1 bg-white hover:bg-red-50 disabled:opacity-50"
+                >
+                  Retry
+                </button>
+                {error.canAutoFix && (
+                  <button
+                    onClick={requestMagicFix}
+                    disabled={fixingPrompt}
+                    className="text-xs font-medium text-indigo-700 border border-indigo-200 rounded-md px-2.5 py-1 bg-white hover:bg-indigo-50 disabled:opacity-50"
+                  >
+                    {fixingPrompt ? 'AI Magic Fixing...' : 'AI Magic Fix'}
+                  </button>
+                )}
+              </div>
+              {error.technicalMessage && (
+                <details className="mt-2 text-xs text-red-500">
+                  <summary className="cursor-pointer select-none">Technical details</summary>
+                  <p className="mt-1 break-words">{error.technicalMessage}</p>
+                </details>
+              )}
+            </div>
           )}
         </div>
+
+        {fixProposal && (
+          <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-4 flex flex-col gap-3">
+            <div>
+              <p className="text-sm font-semibold text-indigo-900">AI Magic Fix is ready</p>
+              <p className="text-sm text-indigo-700 mt-1">{fixProposal.summary}</p>
+            </div>
+            <div className="bg-white border border-indigo-100 rounded-lg p-3">
+              <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-2">Proposed prompt</p>
+              <pre className="text-sm text-gray-700 whitespace-pre-wrap break-words leading-relaxed max-h-48 overflow-y-auto">
+                {fixProposal.repaired_prompt}
+              </pre>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={() => applyMagicFix(false)}
+                className="text-sm font-semibold bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition-colors"
+              >
+                Apply fix
+              </button>
+              <button
+                onClick={() => applyMagicFix(true)}
+                className="text-sm font-semibold text-indigo-700 border border-indigo-200 bg-white hover:bg-indigo-50 px-4 py-2 rounded-lg transition-colors"
+              >
+                Apply fix and retry
+              </button>
+              <button
+                onClick={() => setFixProposal(null)}
+                className="text-sm text-gray-500 hover:text-gray-700 px-2 py-2"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Changes + Diff panels */}
         {result && (
@@ -479,6 +639,14 @@ export default function AppPage() {
             {activeTab === 'optimize' && <DiffViewer original={original} optimized={optimized} />}
           </div>
         )}
+
+        <PromptRegistryPanel
+          original={original}
+          optimized={optimized}
+          activeTab={activeTab}
+          result={result}
+          onLoadPrompt={loadRegistryPrompt}
+        />
       </main>
 
       <ChatBot />
